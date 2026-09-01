@@ -14,10 +14,17 @@
 #  3. When the previous and new full versions match, exit 0 silently. The
 #     bumper uses `git status` to detect the no-op case and skips the PR.
 #
+# Unlike bump-webhook.sh, remotedialer-proxy is also a real Go import in
+# rancher/rancher (pkg/ext/rdp.go imports its forward/proxyclient packages),
+# so this script additionally runs `go get` on the module itself — the
+# chart-version bump into build.yaml alone does not touch go.mod, and the
+# bumper's post-bundle `go mod tidy` pass is a no-op unless go.mod's
+# require line was already changed by something in the bundle.
+#
 # Usage: bump-remotedialer-proxy.sh <new-version>
 #   e.g. CHART_REF=dev-v2.15 bump-remotedialer-proxy.sh v0.8.0-rc.4
 #
-# Required tools in PATH: yq (v4), curl, go (for `go generate`).
+# Required tools in PATH: yq (v4), curl, go (for `go get`/`go generate`).
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
@@ -53,6 +60,10 @@ if [[ ! -f ./build.yaml ]]; then
     echo "Error: ./build.yaml not found — run from a rancher repo root" >&2
     exit 1
 fi
+if [[ ! -f ./go.mod ]]; then
+    echo "Error: ./go.mod not found — run from a rancher repo root" >&2
+    exit 1
+fi
 
 PREV_FULL=$(yq -r '.remoteDialerProxyVersion' ./build.yaml)
 if [[ -z "$PREV_FULL" || "$PREV_FULL" == "null" ]]; then
@@ -60,13 +71,23 @@ if [[ -z "$PREV_FULL" || "$PREV_FULL" == "null" ]]; then
     cat ./build.yaml >&2
     exit 1
 fi
-if [[ "$PREV_FULL" == "$NEW_FULL" ]]; then
-    echo "bump-remotedialer-proxy: already at $NEW_FULL; nothing to do"
+
+GO_MODULE="github.com/rancher/remotedialer-proxy"
+PREV_GO_VERSION=$(go list -m -f '{{.Version}}' "$GO_MODULE" 2>/dev/null || true)
+
+if [[ "$PREV_FULL" == "$NEW_FULL" && "$PREV_GO_VERSION" == "$NEW_VERSION" ]]; then
+    echo "bump-remotedialer-proxy: already at $NEW_FULL ($NEW_VERSION); nothing to do"
     exit 0
 fi
 
 yq --inplace ".remoteDialerProxyVersion = \"${NEW_FULL}\"" ./build.yaml
 
+# go.mod's require line tracks the plain Go module version (e.g. v0.8.0),
+# independent of the chart-prefixed build.yaml value above — bump it too so
+# the two never drift apart the way they historically have.
+GOFLAGS=-mod=mod go get "${GO_MODULE}@${NEW_VERSION}"
+go mod tidy
+
 go generate ./...
 
-echo "bump-remotedialer-proxy: bumped to ${NEW_FULL}"
+echo "bump-remotedialer-proxy: bumped build.yaml to ${NEW_FULL}, go.mod to ${NEW_VERSION}"
